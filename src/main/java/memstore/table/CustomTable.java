@@ -1,13 +1,19 @@
 package memstore.table;
 
+import memstore.data.ByteFormat;
 import memstore.data.DataLoader;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.List;
 
 /**
  * Custom table implementation to adapt to provided query mix.
  */
 public class CustomTable implements Table {
+    protected int numCols;
+    protected int numRows;
+    protected ByteBuffer rows;
 
     public CustomTable() { }
 
@@ -19,7 +25,18 @@ public class CustomTable implements Table {
      */
     @Override
     public void load(DataLoader loader) throws IOException {
-        // TODO: Implement this!
+        this.numCols = loader.getNumCols();
+        List<ByteBuffer> rows = loader.getRows();
+        numRows = rows.size();
+        this.rows = ByteBuffer.allocate(ByteFormat.FIELD_LEN * numRows * numCols);
+
+        for (int rowId = 0; rowId < numRows; rowId++) {
+            ByteBuffer curRow = rows.get(rowId);
+            for (int colId = 0; colId < numCols; colId++) {
+                int offset = ByteFormat.FIELD_LEN * ((rowId * numCols) + colId);
+                this.rows.putInt(offset, curRow.getInt(ByteFormat.FIELD_LEN * colId));
+            }
+        }
     }
 
     /**
@@ -27,8 +44,8 @@ public class CustomTable implements Table {
      */
     @Override
     public int getIntField(int rowId, int colId) {
-        // TODO: Implement this!
-        return 0;
+        int offset = ByteFormat.FIELD_LEN * ((rowId * numCols) + colId);
+        return this.rows.getInt(offset);
     }
 
     /**
@@ -36,7 +53,8 @@ public class CustomTable implements Table {
      */
     @Override
     public void putIntField(int rowId, int colId, int field) {
-        // TODO: Implement this!
+        int offset = ByteFormat.FIELD_LEN * ((rowId * numCols) + colId);
+        this.rows.putInt(offset, field);
     }
 
     /**
@@ -47,8 +65,12 @@ public class CustomTable implements Table {
      */
     @Override
     public long columnSum() {
-        // TODO: Implement this!
-        return 0;
+        long sum = 0;
+        for (int rowId = 0; rowId < numRows; rowId++) {
+            int offset = ByteFormat.FIELD_LEN * ((rowId * numCols));
+            sum = sum + this.rows.getInt(offset);
+        }
+        return sum;
     }
 
     /**
@@ -60,8 +82,16 @@ public class CustomTable implements Table {
      */
     @Override
     public long predicatedColumnSum(int threshold1, int threshold2) {
-        // TODO: Implement this!
-        return 0;
+        long sum = 0;
+        for (int rowId = 0; rowId < numRows; rowId++) {
+            int offset0 = ByteFormat.FIELD_LEN * ((rowId * numCols));
+            int offset1 = ByteFormat.FIELD_LEN * ((rowId * numCols) + 1);
+            int offset2 = ByteFormat.FIELD_LEN * ((rowId * numCols) + 2);
+            if (this.rows.getInt(offset1) > threshold1 && this.rows.getInt(offset2) < threshold2) {
+                sum = sum + this.rows.getInt(offset0);
+            }
+        }
+        return sum;
     }
 
     /**
@@ -72,8 +102,15 @@ public class CustomTable implements Table {
      */
     @Override
     public long predicatedAllColumnsSum(int threshold) {
-        // TODO: Implement this!
-        return 0;
+        long sum = 0;
+        for (int rowId = 0; rowId < numRows; rowId++) {
+            if (getIntField(rowId, 0) > threshold) {
+                for (int colId = 0; colId < numCols; colId++) {
+                    sum = sum + getIntField(rowId, colId);
+                }
+            }
+        }
+        return sum;
     }
 
     /**
@@ -84,8 +121,18 @@ public class CustomTable implements Table {
      */
     @Override
     public int predicatedUpdate(int threshold) {
-        // TODO: Implement this!
-        return 0;
+        int count = 0;
+        for (int rowId = 0; rowId < numRows; rowId++) {
+            int offset0 = ByteFormat.FIELD_LEN * ((rowId * numCols));
+            int offset2 = ByteFormat.FIELD_LEN * ((rowId * numCols) + 2);
+            int offset3 = ByteFormat.FIELD_LEN * ((rowId * numCols) + 3);
+            if (this.rows.getInt(offset0) < threshold) {
+                int field = this.rows.getInt(offset3) + this.rows.getInt(offset2);
+                this.rows.putInt(offset3, field);
+                count++;
+            }
+        }
+        return count;
     }
 
 }

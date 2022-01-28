@@ -11,26 +11,26 @@ import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
-import it.unimi.dsi.fastutil.shorts.Short2BooleanAVLTreeMap;
-
 /**
  * Custom table implementation to adapt to provided query mix.
  */
 public class CustomTable implements Table {
     static final short MAX_FIELD = 1024; // 0x400
-    static final int BUCKET_BUFFER = 100;
+    static final int BUCKET_BUFFER = 1000;
     static final int SHORT_FIELD_LEN = 2;
     static final int INT_FIELD_LEN = 4;
 
-    public int worker_count;
-    public Worker[] workers;
+    private int worker_count;
+    static private Worker[] workers;
     ArrayBlockingQueue<ResultMessage> result_queue;
 
-    protected int numCols;
-    protected int numRows;
+    private int numCols;
+    private int numRows;
     
 
     public CustomTable() { 
+
+        // System.out.println("Creating Custom Table");
         // get the runtime object associated with the current Java application
         Runtime runtime = Runtime.getRuntime();
         
@@ -46,7 +46,7 @@ public class CustomTable implements Table {
             }
         }
         worker_count = (1 << (i + 1));
-        //worker_count = 2;
+        worker_count = 8;
           
         System.out.println("Number of workers: " + worker_count);
     }
@@ -79,7 +79,7 @@ public class CustomTable implements Table {
     }
 
     public class Worker extends Thread {
-        int queue_size = 20;
+        int queue_size = 200;
         public ArrayBlockingQueue<OpMessage> command_queue;
         public ArrayBlockingQueue<ResultMessage> result_queue;
 
@@ -175,10 +175,12 @@ public class CustomTable implements Table {
          * We also stores a index on RowId to Col0_bucket + bucket_index (So we could perform the update)
          * For the rest of the colunums, we will store them using row format. 
          */
-        public Worker(DataLoader loader, int mask, int index, ArrayBlockingQueue<ResultMessage> result_queue) throws Exception {
+        public Worker(DataLoader loader, int mask, int index, ArrayBlockingQueue<ResultMessage> result_queue) {
+            try {
             // if mask is 0xf and index = 0x2
             // This means for a record that col0 = 0x2e, it's not in the current worker
             // And for a record that col0 = ox22, it's in the bucket with bucket num 0x2
+            System.out.println("Starting worker!!!!");
             this.mask = mask;
             this.mask_p1 = mask + 1;
             this.index = index;
@@ -198,6 +200,8 @@ public class CustomTable implements Table {
 
             // Calculating the col0_sum
             for (int i = 0; i < numRows; i++) {
+                int field0 = rows.get(i).getInt(0);
+                if ((field0 & this.mask) != this.index) continue;
                 this.col0_sum = this.col0_sum + rows.get(i).getInt(0);
             }
 
@@ -265,20 +269,27 @@ public class CustomTable implements Table {
                 }
                 this.bucket_rest[bucket_index].next();
             }
+            }
+            catch (Exception e) {
+                System.out.println(e);
+                System.exit(200 + this.index);
+            }
         }
         
         @Override
         public void run() {
-            //System.out.println("MyThread running");
+            System.out.println("MyThread running");
 
-            try {
-                while (true) {
+            while (true) {
+                try {
+                    verify();
                     OpMessage command = command_queue.poll(4, TimeUnit.SECONDS);
                     if (command == null || command.op == 0) {
                         break;
                     } else if (command.op == 1) {
+                        // System.out.println("Command 1");
                         // GetIntField
-                        int field = getIntField(command.var1, command.var2);
+                        int field = workerGetIntField(command.var1, command.var2);
                         if (field < 0) continue;
                         // System.out.println("---Got field: " + field);
                         // System.out.println("Got field row: " + command.var1);
@@ -288,41 +299,87 @@ public class CustomTable implements Table {
                         result.var = (long)field;
                         result_queue.add(result);
                     } else if (command.op == 2) {
-                        putIntField(command.var1, command.var2, command.var3, command.queue);
+                        // System.out.println("Command 2");
+                        workerPutIntField(command.var1, command.var2, command.var3, command.queue);
                     } else if (command.op == 3) {
-                        long sum = columnSum();
+                        // System.out.println("Command 3");
+                        long sum = this.col0_sum;
                         ResultMessage result = new ResultMessage();
                         result.var = sum;
                         result_queue.add(result);
-                    } else if (command.op == 4) {
-                        long sum = predicatedColumnSum(command.var1, command.var2);
+                    } else if (command.op == 4) { 
+                        // System.out.println("Command 4");
+                        long sum = workerPredicatedColumnSum(command.var1, command.var2);
                         ResultMessage result = new ResultMessage();
                         result.var = sum;
                         result_queue.add(result);
                     } else if (command.op == 5) {
-                        long sum = predicatedAllColumnsSum(command.var1);
+                        // System.out.println("Command 5");
+                        long sum = workerPredicatedAllColumnsSum(command.var1);
                         ResultMessage result = new ResultMessage();
                         // System.out.println("---Got sum: " + sum);
                         result.var = sum;
                         result_queue.add(result);
                     } else if (command.op == 6) {
-                        int count = predicatedUpdate(command.var1);
+                        // System.out.println("Command 6");
+                        int count = workerPredicatedUpdate(command.var1);
                         ResultMessage result = new ResultMessage();
                         result.var = (long)count;
                         //System.out.println("---Got count: " + count);
                         result_queue.add(result);
                     } else {
+                        System.out.println("Command " + command.op);
                         //Thread.sleep(4000);
                     }
+                } catch (Exception e) {
+                    System.out.println(e);
                 }
-            } catch (Exception e) {
-                System.out.println(e);
             }
         }
 
-        private int getIntField(int rowId, int colId) {
+        private void panic(int code, String msg) {
+            System.out.println("!!!!!!!!!PANIC:" + msg);
+            System.exit(code);
+        }
+
+        public void verify() {
+            // System.out.println("Verifying!!!!!!!");
+            
+            // for each bucket, they should have the same size
+            for (int bucket = 0; bucket < num_of_buckets; bucket++) {
+                int row_size = bucket_row[bucket].size;
+                if (buckets1[bucket].size != row_size) panic(101, "buckets1[" + bucket + "]size wrong, row: " + row_size + "bucket1: " + buckets1[bucket].size);
+                if (buckets2[bucket].size != row_size) panic(102, "buckets2[" + bucket + "]size wrong, row: " + row_size + "bucket2: " + buckets2[bucket].size);
+                if (buckets3[bucket].size != row_size) panic(103, "buckets3[" + bucket + "]size wrong, row: " + row_size + "bucket2: " + buckets3[bucket].size);
+                if (bucket_rest[bucket].size != row_size) panic(104, "bucket_rest[" + bucket + "]size wrong, row: " + row_size + "bucket_rest: " + bucket_rest[bucket].size);
+            }
+            // for each rowId, we verify that the corresponding bucket/index map back
+            for (int rowId = 0; rowId < numRows; rowId++) {
+                int bucket_id = this.col0_index.get(rowId * 2);
+                int bucket_index = this.col0_index.get(rowId * 2 + 1);
+                // First make sure they are within range
+                if (bucket_id == -1) continue;
+                if (bucket_index >= bucket_row[bucket_id].size) panic(105, "bucket index out of range. row: " + rowId + ",bucket_id:" + bucket_id + ",bucket_index:" + bucket_index);
+                int calculated_row = this.bucket_row[bucket_id].getInt(bucket_index);
+                if (calculated_row != rowId) panic(106, "row: " + rowId + ",calculated_row:" + calculated_row);
+            }
+            // for each rowId, we verify that the corresponding bucket/index map back
+            for (int bucket = 0; bucket < num_of_buckets; bucket++) {
+                IntBucket row_bucket = this.bucket_row[bucket];
+                for (int bucket_index = 0; bucket_index < row_bucket.size; bucket_index++) {
+                    int row_id = row_bucket.getInt(bucket_index);
+                    int mapped_bucket = this.col0_index.get(row_id * 2);
+                    int mapped_bucket_index = this.col0_index.get(row_id * 2 + 1);
+                    if(mapped_bucket != bucket) panic(107, "mapped_bucket: " + mapped_bucket + ",bucket:" + bucket);
+                    if(mapped_bucket_index != bucket_index) panic(108, "mapped_bucket_index: " + mapped_bucket_index + ",bucket_index:" + bucket_index);
+                }
+            }
+        }
+
+        private int workerGetIntField(int rowId, int colId) {
             int bucket = this.col0_index.get(2 * rowId);
             if (bucket < 0) return -1;
+            // System.out.println("getting number from worker: " + index);
             if (colId == 0) return bucket * this.mask_p1 + this.index;
             int bucket_index = this.col0_index.get(2 * rowId + 1);
             if (colId == 1) {
@@ -336,26 +393,33 @@ public class CustomTable implements Table {
             }
         }
 
-        private void putIntField(int rowId, int colId, int field, ArrayBlockingQueue<ByteBuffer> queue) throws Exception {
+        private void workerPutIntField(int rowId, int colId, int field, ArrayBlockingQueue<ByteBuffer> queue) throws Exception {
             int bucket = this.col0_index.get(2 * rowId);
             if (bucket < 0) {
                 // The row doesn't belong to us
                 // Check if we are the receiver
                 if (colId == 0 && (field & this.mask) == index) {
+                    try {
                     // We are the receiver.
                     ByteBuffer row = queue.take();
+
                     bucket = field / this.mask_p1;
+                    System.out.println("receiving number, putting in : " + bucket);
 
                     // Update col0 index
                     this.col0_index.put(rowId * 2, bucket);
-                    this.col0_index.put(rowId * 2, this.bucket_rest[bucket].size);
+                    this.col0_index.put(rowId * 2 + 1, this.bucket_rest[bucket].size);
 
                     // Add the row to the right place
+                    row.position(0);
                     row.asShortBuffer().get(this.bucket_rest[bucket].rows.array(), this.bucket_rest[bucket].size * (total_cols - 4), total_cols - 4);
+
                     this.bucket_rest[bucket].next();
                     this.bucket_row[bucket].pushInt(rowId);
                     this.buckets1[bucket].pushShort(row.getShort((total_cols - 4) * CustomTable.SHORT_FIELD_LEN));
-                    this.buckets2[bucket].pushInt(row.getShort(row.getShort((total_cols - 3) * CustomTable.SHORT_FIELD_LEN)));
+                    try {
+                    this.buckets2[bucket].pushInt(row.getShort((total_cols - 3) * CustomTable.SHORT_FIELD_LEN));
+                    
                     this.buckets3[bucket].pushInt(row.getInt((total_cols - 2) * CustomTable.SHORT_FIELD_LEN));
 
                     // Update sum (both all number sum and col0 sum)
@@ -364,7 +428,15 @@ public class CustomTable implements Table {
                     for (int i = 0; i < total_cols - 2; i++) {
                         this.col0_bucket_sum[bucket] = this.col0_bucket_sum[bucket] + row.asShortBuffer().get(i);
                     }
+                    verify();
+                } catch (Exception e) {
+                    System.out.println("Getting error when summing -b3." + e);
+                    throw e;
+                }
                     return;
+                } catch (Exception e) {
+                    System.out.println("Getting error when we are receiving the row." + e);
+                }
                 } else {
                     // The row doesn't belongs to us and we are not the receiver
                     return;
@@ -394,7 +466,7 @@ public class CustomTable implements Table {
                     // We still own the row, it's just a matter of moving it around
                     int old_col0 = bucket * this.mask_p1 + index;
                     // We know that the col0_sum is only changed due to field change
-                    this.col0_sum = this.col0_sum  + field - old_col0;
+                    this.col0_sum = this.col0_sum + field - old_col0;
                     int new_bucket_index = this.bucket_row[field_bucket].size;
 
                     // Add the row to the new bucket
@@ -402,8 +474,8 @@ public class CustomTable implements Table {
                     // New Value location: field_bucket - new_bucket_index
                     // Move old value to new location
                     short col1 = this.buckets1[bucket].getShort(bucket_index);
-                    int col2 = this.buckets3[bucket].getInt(bucket_index);
-                    int col3 = this.buckets2[bucket].getInt(bucket_index);
+                    int col2 = this.buckets2[bucket].getInt(bucket_index);
+                    int col3 = this.buckets3[bucket].getInt(bucket_index);
 
                     this.bucket_row[field_bucket].pushInt(rowId);
                     this.buckets1[field_bucket].pushShort(col1);
@@ -411,15 +483,16 @@ public class CustomTable implements Table {
                     this.buckets3[field_bucket].pushInt(col3);
 
                     this.bucket_rest[bucket].rows.position(bucket_index * (total_cols - 4));
-                    this.bucket_rest[bucket].rows.put(this.bucket_rest[field_bucket].rows.array(), this.bucket_rest[bucket].size * (total_cols - 4), (total_cols - 4));
+                    this.bucket_rest[field_bucket].rows.put(this.bucket_rest[bucket].rows.array(), new_bucket_index * (total_cols - 4), (total_cols - 4));
                     this.bucket_rest[field_bucket].next();
 
                     // Updatet the row to reflect the new position
                     this.col0_index.put(2 * rowId, field_bucket);
                     this.col0_index.put(2 * rowId + 1, new_bucket_index);
+                    System.out.println("------111-------------: " + field_bucket + ", " + new_bucket_index);
                     // Add it to sum
                     long sum = 0;
-                    sum = sum + col1 + col2 + col3;
+                    sum = sum + col1 + col2;
                     for (int i = 0; i < total_cols - 4; i++) {
                         sum = sum + this.bucket_rest[field_bucket].getShort(this.bucket_rest[field_bucket].size - 1, i);
                     }
@@ -429,13 +502,16 @@ public class CustomTable implements Table {
                     // Then we need to delete the old value
                     // We delete the old value by moving the last row to replace it
                     if (bucket_index + 1 == this.bucket_rest[bucket].size) {
+                        System.out.println("------111--------We are moving rows---------: " + bucket_index + ", " + this.bucket_rest[bucket].size);
                         // We are deleting the last line, simply update the size and we are done
                         this.bucket_row[bucket].size--;
                         this.buckets1[bucket].size--;
                         this.buckets2[bucket].size--;
                         this.buckets3[bucket].size--;
                         this.bucket_rest[bucket].size--;
+                        verify();
                     } else {
+                        System.out.println("--------------We are moving rows---------");
                         // We are not the last row, we will move the last row to replace the old row
                         this.bucket_row[bucket].size--;
                         this.buckets1[bucket].size--;
@@ -469,7 +545,7 @@ public class CustomTable implements Table {
                     // All except col3 (4 Bytes) takes 2 Bytes, so total is total_cols * CustomTable.SHORT_FIELD_LEN
                     ByteBuffer m = ByteBuffer.allocate(total_cols * CustomTable.SHORT_FIELD_LEN);
                     this.bucket_rest[bucket].rows.position(bucket_index * (total_cols - 4));
-                    this.bucket_rest[bucket].rows.put(m.asShortBuffer().array(), 0, (total_cols - 4));
+                    m.asShortBuffer().put(this.bucket_rest[bucket].rows.array(), 0, (total_cols - 4));
                     short col1 = this.buckets1[bucket].getShort(bucket_index);
                     short col2 = (short)this.buckets2[bucket].getInt(bucket_index);
                     int col3 = this.buckets3[bucket].getInt(bucket_index);
@@ -480,7 +556,7 @@ public class CustomTable implements Table {
                     // Calculating the row sum before the row is replaced
                     int old_col0 = bucket * this.mask_p1 + index;
                     long sum = 0;
-                    sum = sum + col1 + col2 + col3;
+                    sum = sum + col1 + col2;
                     for (int i = 0; i < total_cols - 4; i++) {
                         sum = sum + m.asShortBuffer().get(i);
                     }
@@ -554,12 +630,23 @@ public class CustomTable implements Table {
          *  Returns the sum of all elements in the first column of the table,
          *  subject to the passed-in predicates.
          */
-        public long predicatedColumnSum(int threshold1, int threshold2) { 
+        public long columnSum() {
+            return this.col0_sum;
+        }
+
+        /**
+         * Implements the query
+         *  SELECT SUM(col0) FROM table WHERE col1 > threshold1 AND col2 < threshold2;
+         *
+         *  Returns the sum of all elements in the first column of the table,
+         *  subject to the passed-in predicates.
+         */
+        public long workerPredicatedColumnSum(int threshold1, int threshold2) { 
             long sum = 0;
             for(int bucket = 0; bucket < num_of_buckets; bucket++) {
                 int bucket_size = this.buckets1[bucket].size;
                 for (int j = 0; j < bucket_size; j++) {
-                    if ((int)this.buckets1[bucket].getShort(j) > threshold1 && this.buckets2[bucket].getInt(j) > threshold2) {
+                    if ((int)this.buckets1[bucket].getShort(j) > threshold1 && this.buckets2[bucket].getInt(j) < threshold2) {
                         sum = sum + bucket * this.mask_p1 + this.index;
                     }
                 }
@@ -573,7 +660,7 @@ public class CustomTable implements Table {
          *
          *   Returns the number of rows updated.
          */
-        private int predicatedUpdate(int threshold) {
+        private int workerPredicatedUpdate(int threshold) {
             if (threshold < 0) return 0;
             int count = 0;
             int treshold_bucket = threshold / this.mask_p1;
@@ -600,7 +687,7 @@ public class CustomTable implements Table {
          *
          *  Returns the sum of all elements in the rows which pass the predicate.
          */
-        public long predicatedAllColumnsSum(int threshold) {
+        public long workerPredicatedAllColumnsSum(int threshold) {
             // We keep the sum of all bucket except col3.
             long sum = 0;
             int start_bucket;
@@ -642,6 +729,19 @@ public class CustomTable implements Table {
 
         result_queue = new ArrayBlockingQueue<ResultMessage>(200);
         int mask = this.worker_count - 1;
+        try {
+            if (workers != null) {
+                for (Worker worker : workers) {
+                    if (worker == null) continue;
+                    OpMessage m = new OpMessage();
+                    m.op = 0;
+                    worker.command_queue.add(m);
+                    worker.join();
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("CustomTable.load()" + e);
+        }
 
         try {
             workers = new Worker[worker_count];
@@ -702,6 +802,7 @@ public class CustomTable implements Table {
     @Override
     public long columnSum() {
         long sum = 0;
+        
         for (Worker worker : workers) {
             OpMessage m = new OpMessage();
             m.op = 3;
@@ -711,6 +812,7 @@ public class CustomTable implements Table {
             for (int i = 0; i < workers.length; i++) {
                 ResultMessage result_message = result_queue.take();
                 sum = sum + result_message.var;
+                // System.out.println("Getting columnSum from: " + i);
             }
             return sum;
         } catch (Exception e) {
@@ -735,12 +837,12 @@ public class CustomTable implements Table {
             m.var1 = threshold1;
             m.var2 = threshold2;
             worker.command_queue.add(m);
-            System.out.println("Sending command.");
+            // System.out.println("Sending command.");
         }
         try {
             for (int i = 0; i < workers.length; i++) {
                 ResultMessage result_message = result_queue.take();
-                System.out.println("Receive command from " + i);
+                // System.out.println("Receive command from " + i);
                 sum = sum + result_message.var;
             }
             return sum;
@@ -803,24 +905,4 @@ public class CustomTable implements Table {
             return -1;
         }
     }
-
-   protected void finalize() throws Throwable {
-      try {
-        for (Worker worker : workers) {
-            OpMessage m = new OpMessage();
-            m.op = 0;
-            worker.command_queue.add(m);
-        }
-        for (Worker worker : workers) {
-            worker.join();
-        }
-         System.out.println("Calling finalize() method of FinalizeMethodTest class");
-      } catch(Throwable th) {
-         throw th;
-      } finally {
-         System.out.println("Calling finalize() method of Object class");
-         super.finalize();
-      }
-   }
-
 }

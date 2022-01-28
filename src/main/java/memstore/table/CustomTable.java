@@ -47,7 +47,7 @@ public class CustomTable implements Table {
             }
         }
         worker_count = (1 << (i));
-        //worker_count = 8;
+        worker_count = 4;
           
         System.out.println("Number of workers: " + worker_count);
     }
@@ -202,6 +202,7 @@ public class CustomTable implements Table {
                 numRow[i] = 0;
             }
 
+            // calculating
             for (int i = 0; i < CustomTable.MAX_FIELD; i++) {
                 for (int j = 0; j < CustomTable.MAX_FIELD; j++) {
                     this.col1_col2_sum[i][j] = 0;
@@ -218,8 +219,8 @@ public class CustomTable implements Table {
             // Calculating the col1_col2_sum
             for (int i = 0; i < numRows; i++) {
                 int field0 = rows.get(i).getInt(0);
-                int field1 = rows.get(i).getInt(1);
-                int field2 = rows.get(i).getInt(2);
+                int field1 = rows.get(i).getInt(CustomTable.INT_FIELD_LEN);
+                int field2 = rows.get(i).getInt(CustomTable.INT_FIELD_LEN * 2);
                 if ((field0 & this.mask) != this.index) continue;
                 this.col1_col2_sum[field1][field2] = this.col1_col2_sum[field1][field2] + field0;
             }
@@ -291,7 +292,7 @@ public class CustomTable implements Table {
             }
             catch (Exception e) {
                 System.out.println(e);
-                System.exit(200 + this.index);
+                //// System.exit(200 + this.index);
             }
         }
         
@@ -353,14 +354,14 @@ public class CustomTable implements Table {
                 }
             } catch (Exception e) {
                 System.out.println(e);
-                System.exit(100);
+                // // System.exit(100);
             }
             System.out.println("Worker stops: " + index);
         }
 
         private void panic(int code, String msg) {
             System.out.println("!!!!!!!!!PANIC:" + msg);
-            System.exit(code);
+            // System.exit(code);
         }
 
         public void verify() {
@@ -435,9 +436,10 @@ public class CustomTable implements Table {
                     row.asShortBuffer().get(this.bucket_rest[bucket].rows.array(), this.bucket_rest[bucket].size * (total_cols - 4), total_cols - 4);
                     this.bucket_rest[bucket].next();
                     this.bucket_row[bucket].pushInt(rowId);
-                    this.buckets1[bucket].pushShort(row.getShort((total_cols - 4) * CustomTable.SHORT_FIELD_LEN));
-
-                    this.buckets2[bucket].pushInt(row.getShort((total_cols - 3) * CustomTable.SHORT_FIELD_LEN));
+                    short field1 = row.getShort((total_cols - 4) * CustomTable.SHORT_FIELD_LEN);
+                    this.buckets1[bucket].pushShort(field1);
+                    int field2 = row.getShort((total_cols - 3) * CustomTable.SHORT_FIELD_LEN);
+                    this.buckets2[bucket].pushInt(field2);
                     
                     this.buckets3[bucket].pushInt(row.getInt((total_cols - 2) * CustomTable.SHORT_FIELD_LEN));
 
@@ -447,6 +449,10 @@ public class CustomTable implements Table {
                     for (int i = 0; i < total_cols - 2; i++) {
                         this.col0_bucket_sum[bucket] = this.col0_bucket_sum[bucket] + row.asShortBuffer().get(i);
                     }
+
+                    // Update the col1, col2 index
+                    this.col1_col2_sum[field1][field2] = this.col1_col2_sum[field1][field2] + field;
+
                     return;
                 } else {
                     // The row doesn't belongs to us and we are not the receiver
@@ -552,7 +558,10 @@ public class CustomTable implements Table {
                     // remove the old value from bucket_sum
                     this.col0_bucket_sum[bucket] = this.col0_bucket_sum[bucket] - sum - old_col0;
 
-                    // We also need to update the rowId -> bucket, bucket_index mapping
+                    // Update the col1, col2 index
+                    this.col1_col2_sum[col1][col2] = this.col1_col2_sum[col1][col2] + field - old_col0;
+
+                    // --We also need to update the rowId -> bucket, bucket_index mapping
 
 
                 } else {
@@ -622,17 +631,31 @@ public class CustomTable implements Table {
                     // We don't own the row anymore, delete it from col0_sum
                     this.col0_sum = this.col0_sum - old_col0;
 
+                    // Update the col1, col2 index
+                    this.col1_col2_sum[col1][col2] = this.col1_col2_sum[col1][col2] - old_col0;
+
                 }
             } else if (colId == 1) {
                 int old_field = this.buckets1[bucket].rows.get(bucket_index);
+                int col2 = this.buckets2[bucket].rows.get(bucket_index);
+                int col0 = bucket * this.mask_p1 + this.index;
                 // Update the sum
                 this.col0_bucket_sum[bucket] = this.col0_bucket_sum[bucket] - old_field + field;
                 this.buckets1[bucket].rows.put(bucket_index, (short)field);
+                // Update the col1, col2 index
+                this.col1_col2_sum[old_field][col2] = this.col1_col2_sum[old_field][col2] - col0;
+                this.col1_col2_sum[field][col2] = this.col1_col2_sum[field][col2] + col0;
+
             } else if (colId == 2) {
                 int old_field = this.buckets2[bucket].rows.get(bucket_index);
+                int col1 = this.buckets1[bucket].rows.get(bucket_index);
+                int col0 = bucket * this.mask_p1 + this.index;
                 // Update the sum
                 this.col0_bucket_sum[bucket] = this.col0_bucket_sum[bucket] - old_field + field;
                 this.buckets2[bucket].rows.put(bucket_index, field);
+                // Update the col1, col2 index
+                this.col1_col2_sum[col1][old_field] = this.col1_col2_sum[col1][old_field] - col0;
+                this.col1_col2_sum[col1][field] = this.col1_col2_sum[col1][field] + col0;
             } else if (colId == 3) {
                 this.buckets3[bucket].rows.put(bucket_index, field);
             } else {
@@ -660,12 +683,10 @@ public class CustomTable implements Table {
          */
         public long workerPredicatedColumnSum(int threshold1, int threshold2) {
             long sum = 0;
-            for(int bucket = 0; bucket < num_of_buckets; bucket++) {
-                int bucket_size = this.buckets1[bucket].size;
-                for (int j = 0; j < bucket_size; j++) {
-                    if ((int)this.buckets1[bucket].getShort(j) > threshold1 && this.buckets2[bucket].getInt(j) < threshold2) {
-                        sum = sum + bucket * this.mask_p1 + this.index;
-                    }
+            if (threshold1 < 0) threshold1 = -1;
+            for(int col1 = threshold1 + 1; col1 < CustomTable.MAX_FIELD; col1++) {
+                for (int col2 = 0; col2 < threshold2; col2++) {
+                    sum = sum + this.col1_col2_sum[col1][col2];
                 }
             }
             return sum;
@@ -759,7 +780,7 @@ public class CustomTable implements Table {
             }
         } catch (Exception e) {
             System.out.println("CustomTable.load()" + e);
-            System.exit(100);
+            // System.exit(100);
         }
 
         try {
@@ -771,7 +792,7 @@ public class CustomTable implements Table {
             }
         } catch (Exception e) {
             System.out.println(e);
-            System.exit(100);
+            // System.exit(100);
         }
     }
 
@@ -791,12 +812,12 @@ public class CustomTable implements Table {
             ResultMessage result_message = result_queue.poll(4, TimeUnit.SECONDS);
             if (result_message == null) {
                 System.out.println("Time out while wait for GetIntField");
-                System.exit(100);
+                // System.exit(100);
             }
             return (int)result_message.var;
         } catch (Exception e) {
             System.out.println("GetIntField Failed. This should not happen: " + e);
-            System.exit(100);
+            // System.exit(100);
             return -1;
         }
     }
@@ -838,7 +859,7 @@ public class CustomTable implements Table {
                 ResultMessage result_message = result_queue.poll(4, TimeUnit.SECONDS);
                 if (result_message == null) {
                     System.out.println("Time out while wait for columnSum: " + i);
-                    System.exit(100);
+                    // System.exit(100);
                 }
                 sum = sum + result_message.var;
                 // System.out.println("Getting columnSum from: " + i);
@@ -846,7 +867,7 @@ public class CustomTable implements Table {
             return sum;
         } catch (Exception e) {
             System.out.println("columnSum Failed. This should not happen: " + e);
-            System.exit(100);
+            // System.exit(100);
             return -1;
         }
     }
@@ -874,7 +895,7 @@ public class CustomTable implements Table {
                 ResultMessage result_message = result_queue.poll(4, TimeUnit.SECONDS);
                 if (result_message == null) {
                     System.out.println("Time out while wait for columnSum: " + i);
-                    System.exit(100);
+                    // System.exit(100);
                 }
                 // System.out.println("Receive command from " + i);
                 sum = sum + result_message.var;
@@ -882,7 +903,7 @@ public class CustomTable implements Table {
             return sum;
         } catch (Exception e) {
             System.out.println("predicatedColumnSum Failed. This should not happen: " + e);
-            System.exit(100);
+            // System.exit(100);
             return -1;
         }
     }
@@ -907,14 +928,14 @@ public class CustomTable implements Table {
                 ResultMessage result_message = result_queue.poll(4, TimeUnit.SECONDS);
                 if (result_message == null) {
                     System.out.println("Time out while wait for columnSum: " + i);
-                    System.exit(100);
+                    // System.exit(100);
                 }
                 sum = sum + result_message.var;
             }
             return sum;
         } catch (Exception e) {
             System.out.println("predicatedAllColumnsSum Failed. This should not happen: " + e);
-            System.exit(100);
+            // System.exit(100);
             return -1;
         }
     }
@@ -939,14 +960,14 @@ public class CustomTable implements Table {
                 ResultMessage result_message = result_queue.poll(4, TimeUnit.SECONDS);
                 if (result_message == null) {
                     System.out.println("Time out while wait for columnSum: " + i);
-                    System.exit(100);
+                    // System.exit(100);
                 }
                 count = count + (int)result_message.var;
             }
             return count;
         } catch (Exception e) {
             System.out.println("predicatedUpdate Failed. This should not happen: " + e);
-            System.exit(100);
+            // System.exit(100);
             return -1;
         }
     }

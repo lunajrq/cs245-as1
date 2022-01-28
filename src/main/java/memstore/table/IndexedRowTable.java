@@ -161,32 +161,29 @@ public class IndexedRowTable implements Table {
      */
     @Override
     public long predicatedAllColumnsSum(int threshold) {
-        if (indexColumn == 0) {
+        // if (indexColumn == 0) {
+        //     long sum = 0;
+        //     NavigableMap<Integer, IntArrayList> map = index.tailMap(threshold, false);
+        //     for(IntArrayList list: map.values()) {
+        //         for (int row : list) {
+        //             for (int offset = ByteFormat.FIELD_LEN * (row * numCols); offset < ByteFormat.FIELD_LEN * ((row + 1) * numCols); offset = offset + ByteFormat.FIELD_LEN) {
+        //                 sum = sum + this.rows.getInt(offset);
+        //             }
+        //         }
+        //     }
+        //     return sum;
+        // } else {
             long sum = 0;
-            NavigableMap<Integer, IntArrayList> map = index.tailMap(threshold, false);
-            for(IntArrayList list: map.values()) {
-                for (int row : list) {
-                    for (int colId = 0; colId < numCols; colId++) {
-                        sum = sum + getIntField(row, colId);
-                    }
-                }
-            }
-            return sum;
-        } else {
-            long sums[] = new long[numCols];
             for (int rowId = 0; rowId < numRows; rowId++) {
                 int offset0 = ByteFormat.FIELD_LEN * ((rowId * numCols));
                 if (this.rows.getInt(offset0) > threshold) {
-                    for (int colId = 0; colId < numCols; colId++) {
-                        int offset = ByteFormat.FIELD_LEN * ((rowId * numCols) + colId);
-                        sums[colId] = sums[colId] + this.rows.getInt(offset);
+                    for (int offset = ByteFormat.FIELD_LEN * (rowId * numCols); offset < ByteFormat.FIELD_LEN * ((rowId + 1) * numCols); offset = offset + ByteFormat.FIELD_LEN) {
+                        sum = sum + this.rows.getInt(offset);
                     }
                 }
             }
-            long sum = 0;
-            for (long sub_sum : sums) sum = sum + sub_sum;
             return sum;
-        }
+        //}
     }
 
     /**

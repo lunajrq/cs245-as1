@@ -94,8 +94,9 @@ public class CustomTable implements Table {
         LargeShortBucket bucket_rest[];
 
         long col0_sum;
-        long bucket_sum_all[]; // This sum includes all cols
-        long bucket_sum_col2[]; // This sum includes only col2
+        long col0_bucket_sum[]; // This sum intentionally exclude col3
+
+        long col1_col2_sum[][];
         
 
         // col0_index is in the following format
@@ -190,6 +191,7 @@ public class CustomTable implements Table {
             this.command_queue = new ArrayBlockingQueue<OpMessage>(queue_size);
             this.result_queue = result_queue;
             this.col0_sum = 0;
+            this.col1_col2_sum = new long[CustomTable.MAX_FIELD][CustomTable.MAX_FIELD];
 
             int numCols = loader.getNumCols();
             List<ByteBuffer> rows = loader.getRows();
@@ -200,11 +202,26 @@ public class CustomTable implements Table {
                 numRow[i] = 0;
             }
 
+            for (int i = 0; i < CustomTable.MAX_FIELD; i++) {
+                for (int j = 0; j < CustomTable.MAX_FIELD; j++) {
+                    this.col1_col2_sum[i][j] = 0;
+                }
+            }
+
             // Calculating the col0_sum
             for (int i = 0; i < numRows; i++) {
                 int field0 = rows.get(i).getInt(0);
                 if ((field0 & this.mask) != this.index) continue;
                 this.col0_sum = this.col0_sum + rows.get(i).getInt(0);
+            }
+
+            // Calculating the col1_col2_sum
+            for (int i = 0; i < numRows; i++) {
+                int field0 = rows.get(i).getInt(0);
+                int field1 = rows.get(i).getInt(1);
+                int field2 = rows.get(i).getInt(2);
+                if ((field0 & this.mask) != this.index) continue;
+                this.col1_col2_sum[field1][field2] = this.col1_col2_sum[field1][field2] + field0;
             }
 
             // calculating the number of row's in each bucket
@@ -226,8 +243,7 @@ public class CustomTable implements Table {
             this.buckets3 = new IntBucket[num_of_buckets];
             this.bucket_row = new IntBucket[num_of_buckets];
             this.bucket_rest = new LargeShortBucket[num_of_buckets];
-            this.bucket_sum_all = new long[num_of_buckets];
-            this.bucket_sum_col2 = new long[num_of_buckets];
+            this.col0_bucket_sum = new long[num_of_buckets];
             this.col0_index = IntBuffer.allocate(2 * total_rows);
             for (int i = 0; i < 2 * total_rows; i++) {
                 this.col0_index.put(i, -1);
@@ -239,7 +255,7 @@ public class CustomTable implements Table {
                 buckets2[i] = new IntBucket(numRow[i] + CustomTable.BUCKET_BUFFER);
                 buckets3[i] = new IntBucket(numRow[i] + CustomTable.BUCKET_BUFFER);
                 bucket_rest[i] = new LargeShortBucket(numRow[i] + CustomTable.BUCKET_BUFFER, numCols - 4);
-                this.bucket_sum_all[i] = 0L;
+                this.col0_bucket_sum[i] = 0L;
             }
 
             for (int rowId = 0; rowId < total_rows; rowId++) {
@@ -256,12 +272,9 @@ public class CustomTable implements Table {
                 buckets2[bucket_index].pushInt(field2);
                 buckets3[bucket_index].pushInt(field3);
                 // Adding col0, col1, col2 to the bucket sum. (col3 is left out intentionally)
-                this.bucket_sum_all[bucket_index] = this.bucket_sum_all[bucket_index] + field0;
-                this.bucket_sum_all[bucket_index] = this.bucket_sum_all[bucket_index] + field1;
-                this.bucket_sum_all[bucket_index] = this.bucket_sum_all[bucket_index] + field2;
-                this.bucket_sum_all[bucket_index] = this.bucket_sum_all[bucket_index] + field3;
-
-                this.bucket_sum_col2[bucket_index] = this.bucket_sum_col2[bucket_index] + field2;
+                this.col0_bucket_sum[bucket_index] = this.col0_bucket_sum[bucket_index] + field0;
+                this.col0_bucket_sum[bucket_index] = this.col0_bucket_sum[bucket_index] + field1;
+                this.col0_bucket_sum[bucket_index] = this.col0_bucket_sum[bucket_index] + field2;
 
                 // Calculate col0 index (rowId -> col0 position)
                 this.col0_index.put(2 * rowId, bucket_index);
@@ -271,7 +284,7 @@ public class CustomTable implements Table {
                     int field = curRow.getInt(CustomTable.INT_FIELD_LEN * j);
                     this.bucket_rest[bucket_index].pushShort(j - 4, (short)field);
                     // Add the field to the bucket-wise sum.
-                    this.bucket_sum_all[bucket_index] = this.bucket_sum_all[bucket_index] + field;
+                    this.col0_bucket_sum[bucket_index] = this.col0_bucket_sum[bucket_index] + field;
                 }
                 this.bucket_rest[bucket_index].next();
             }
@@ -423,18 +436,17 @@ public class CustomTable implements Table {
                     this.bucket_rest[bucket].next();
                     this.bucket_row[bucket].pushInt(rowId);
                     this.buckets1[bucket].pushShort(row.getShort((total_cols - 4) * CustomTable.SHORT_FIELD_LEN));
-                    int field2 = row.getShort((total_cols - 3) * CustomTable.SHORT_FIELD_LEN);
-                    this.buckets2[bucket].pushInt(field2);
-                    int field3 = row.getInt((total_cols - 2) * CustomTable.SHORT_FIELD_LEN);
-                    this.buckets3[bucket].pushInt(field3);
+
+                    this.buckets2[bucket].pushInt(row.getShort((total_cols - 3) * CustomTable.SHORT_FIELD_LEN));
+                    
+                    this.buckets3[bucket].pushInt(row.getInt((total_cols - 2) * CustomTable.SHORT_FIELD_LEN));
 
                     // Update sum (both all number sum and col0 sum)
                     this.col0_sum = this.col0_sum + field;
-                    this.bucket_sum_all[bucket] = this.bucket_sum_all[bucket] + field + field3;
+                    this.col0_bucket_sum[bucket] = this.col0_bucket_sum[bucket] + field;
                     for (int i = 0; i < total_cols - 2; i++) {
-                        this.bucket_sum_all[bucket] = this.bucket_sum_all[bucket] + row.asShortBuffer().get(i);
+                        this.col0_bucket_sum[bucket] = this.col0_bucket_sum[bucket] + row.asShortBuffer().get(i);
                     }
-                    this.bucket_sum_col2[bucket] = this.bucket_sum_col2[bucket] + field2;
                     return;
                 } else {
                     // The row doesn't belongs to us and we are not the receiver
@@ -451,7 +463,7 @@ public class CustomTable implements Table {
                     return;
                 }
                 this.bucket_rest[bucket].putShort(bucket_index, colId - 4, (short)field);
-                this.bucket_sum_all[bucket] = this.bucket_sum_all[bucket] + field - old_value;
+                this.col0_bucket_sum[bucket] = this.col0_bucket_sum[bucket] + field - old_value;
             } else if (colId == 0) {
                 // We are updating our primary index now.
                 if (bucket * this.mask_p1 + bucket_index == field) {
@@ -496,12 +508,12 @@ public class CustomTable implements Table {
                     // System.out.println("bucket first row id:" + this.bucket_rest[field_bucket].getShort(1, 0));
                     // Add it to sum
                     long sum = 0;
-                    sum = sum + col1 + col2 + col3;
+                    sum = sum + col1 + col2;
                     for (int i = 0; i < total_cols - 4; i++) {
                         sum = sum + this.bucket_rest[field_bucket].getShort(this.bucket_rest[field_bucket].size - 1, i);
                     }
 
-                    this.bucket_sum_all[field_bucket] = this.bucket_sum_all[field_bucket] + sum + field;
+                    this.col0_bucket_sum[field_bucket] = this.col0_bucket_sum[field_bucket] + sum + field;
 
                     // Then we need to delete the old value
                     // We delete the old value by moving the last row to replace it
@@ -538,8 +550,7 @@ public class CustomTable implements Table {
                         this.col0_index.put(2 * moved_row + 1, bucket_index);
                     }
                     // remove the old value from bucket_sum
-                    this.bucket_sum_all[bucket] = this.bucket_sum_all[bucket] - sum - old_col0;
-                    this.bucket_sum_col2[bucket] = this.bucket_sum_col2[bucket] - col2;
+                    this.col0_bucket_sum[bucket] = this.col0_bucket_sum[bucket] - sum - old_col0;
 
                     // We also need to update the rowId -> bucket, bucket_index mapping
 
@@ -561,7 +572,7 @@ public class CustomTable implements Table {
                     // Calculating the row sum before the row is replaced
                     int old_col0 = bucket * this.mask_p1 + index;
                     long sum = 0;
-                    sum = sum + col1 + col2 + col3;
+                    sum = sum + col1 + col2;
                     for (int i = 0; i < total_cols - 4; i++) {
                         sum = sum + m.asShortBuffer().get(i);
                     }
@@ -607,8 +618,7 @@ public class CustomTable implements Table {
                         this.col0_index.put(2 * moved_row + 1, bucket_index);
                     }
                     // Delete it from sum
-                    this.bucket_sum_all[bucket] = this.bucket_sum_all[bucket] - sum - old_col0;
-                    this.bucket_sum_col2[bucket] = this.bucket_sum_col2[bucket] - col2;
+                    this.col0_bucket_sum[bucket] = this.col0_bucket_sum[bucket] - sum - old_col0;
                     // We don't own the row anymore, delete it from col0_sum
                     this.col0_sum = this.col0_sum - old_col0;
 
@@ -616,19 +626,15 @@ public class CustomTable implements Table {
             } else if (colId == 1) {
                 int old_field = this.buckets1[bucket].rows.get(bucket_index);
                 // Update the sum
-                this.bucket_sum_all[bucket] = this.bucket_sum_all[bucket] - old_field + field;
+                this.col0_bucket_sum[bucket] = this.col0_bucket_sum[bucket] - old_field + field;
                 this.buckets1[bucket].rows.put(bucket_index, (short)field);
             } else if (colId == 2) {
                 int old_field = this.buckets2[bucket].rows.get(bucket_index);
                 // Update the sum
-                this.bucket_sum_all[bucket] = this.bucket_sum_all[bucket] - old_field + field;
-                this.bucket_sum_col2[bucket] = this.bucket_sum_col2[bucket] - old_field + field;
+                this.col0_bucket_sum[bucket] = this.col0_bucket_sum[bucket] - old_field + field;
                 this.buckets2[bucket].rows.put(bucket_index, field);
             } else if (colId == 3) {
-                int old_field = this.buckets3[bucket].rows.get(bucket_index);
-                // Update the sum
                 this.buckets3[bucket].rows.put(bucket_index, field);
-                this.bucket_sum_all[bucket] = this.bucket_sum_all[bucket] - old_field + field;
             } else {
                 throw new IllegalArgumentException("Getting wrong colId in PutIntField: " + colId);
             }
@@ -685,14 +691,10 @@ public class CustomTable implements Table {
 
             for (int i = 0; i <= end_bucket; i++) {
                 count = count + this.buckets3[i].size;
-                this.bucket_sum_all[i] = this.bucket_sum_all[i] + this.bucket_sum_col2[i];
                 for (int j = 0; j < this.buckets3[i].size; j++) {
                     this.buckets3[i].rows.array()[j] = this.buckets3[i].rows.array()[j] + this.buckets2[i].rows.array()[j];
                 }
             }
-
-
-
             return count;
         }
 
@@ -720,7 +722,10 @@ public class CustomTable implements Table {
 
             // @TODO: optimize this part (split into multiple add)
             for (int i = start_bucket; i < this.num_of_buckets; i++) {
-                sum = sum + this.bucket_sum_all[i];
+                sum = sum + this.col0_bucket_sum[i];
+                for (int j = 0; j < this.buckets3[i].size; j++) {
+                    sum = sum + this.buckets3[i].rows.array()[j];
+                }
             }
             return sum;
 

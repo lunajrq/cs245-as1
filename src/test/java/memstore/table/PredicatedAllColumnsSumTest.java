@@ -42,4 +42,11 @@ public class PredicatedAllColumnsSumTest {
         it.load(dl);
         assertEquals(166, it.predicatedAllColumnsSum(3));
     }
+
+    @Test
+    public void testCustomTable() throws IOException {
+        CustomTable it = new CustomTable();
+        it.load(dl);
+        assertEquals(166, it.predicatedAllColumnsSum(3));
+    }
 }
